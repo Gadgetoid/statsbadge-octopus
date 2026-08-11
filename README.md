@@ -38,10 +38,10 @@ Nothing else needs setting. The tariff, the region, the product code and the met
 | Price now | Pence a kWh including VAT, for the half hour in progress |
 | Standing charge | Pence a day |
 | Tariff | The product the readings are priced against, so a page with no curve says why |
-| Last half hour | The most recent reading the meter has sent Octopus |
-| Last full day | A whole local day, so a part-reported day is skipped rather than read as a quiet one |
-| Cost that day | That day's half-hours, each priced at the rate that applied to it |
-| Meter reported | How many hours behind the meter is. Two days is normal |
+| Newest half hour | The most recent half hour the meter has sent Octopus, which is not the half hour just gone - see below |
+| Newest full day | A whole local day, so a part-reported day is skipped rather than read as a quiet one |
+| Cost of that day | That day's half-hours, each priced at the rate that applied to it |
+| Meter behind by | How far behind the newest reading is. A day or two is normal |
 
 On a tariff with a half-hourly curve, also:
 
@@ -59,8 +59,16 @@ On a tariff with a half-hourly curve, also:
 | ---- | ---- | ----- |
 | The next six hours | bars | `Next slots` |
 | Today's shape | graph | `Price now` |
-| At a glance | grid | `Price now`, `Cheapest slot in`, `Last full day`, `Cost that day` |
+| At a glance | grid | `Price now`, `Cheapest slot in`, `Newest full day`, `Cost of that day` |
 | Where it is going | trend | `Price now` |
+
+## None of the meter readings are live
+
+A smart meter sends its half-hours to Octopus in its own time, usually a day or two later, and the API has what it has been sent. So **Newest half hour** is the most recent half hour on record, not the one just gone, and a graph of it ends where the readings do rather than at now.
+
+**Meter behind by** is how stale that is. Worth putting beside the others on a grid page: 19 kWh means something different at 2 hours behind than at 40.
+
+The prices are live. It is only the meter that lags.
 
 ## Gas
 

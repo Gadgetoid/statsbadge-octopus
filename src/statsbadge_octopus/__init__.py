@@ -110,12 +110,15 @@ AGILE_FIELDS = {
     "forward_p": {"label": "Next slots", "unit": "p", "list": True},
 }
 
-# What a meter recorded. Days behind, so these are the last complete day and not today.
+# What a meter recorded, which is never now: Octopus has the half-hours a meter has sent it,
+# and a meter sends them a day or two later. Every label here says which half hour or which
+# day it means, since "last half hour" beside a meter 19 hours behind is a promise of
+# recency that none of these can keep.
 USE_FIELDS = {
-    "kwh": {"label": "Last half hour", "unit": "kWh", "history": True},
-    "kwh_day": {"label": "Last full day", "unit": "kWh"},
-    "cost_day": {"label": "Cost that day", "unit": "p"},
-    "behind_h": {"label": "Meter reported", "unit": "h"},
+    "kwh": {"label": "Newest half hour", "unit": "kWh", "history": True},
+    "kwh_day": {"label": "Newest full day", "unit": "kWh"},
+    "cost_day": {"label": "Cost of that day", "unit": "p"},
+    "behind_h": {"label": "Meter behind by", "unit": "h"},
 }
 
 # A companion travels beside the field it labels and is declared nowhere, so the field

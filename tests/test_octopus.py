@@ -358,6 +358,32 @@ def test_gas_is_converted_out_of_cubic_metres():
 
 
 @check
+def test_no_meter_reading_claims_to_be_recent():
+    """A meter 19 hours behind offering a reading called "last half hour" is a lie.
+
+    Octopus has the half-hours a meter has sent it, and a meter sends them a day or two
+    later, so every label here says which half hour or which day it means.
+    """
+    from statsbadge_octopus import USE_FIELDS
+
+    labels = {name: entry["label"] for name, entry in USE_FIELDS.items()}
+    for name, label in labels.items():
+        assert "last" not in label.lower(), f"{name} is called {label!r}"
+    assert labels["kwh"] == "Newest half hour", labels["kwh"]
+    # The reading that says how stale the rest of them are.
+    assert "behind" in labels["behind_h"].lower(), labels["behind_h"]
+
+    # A graph of it ends where the readings end, which is what age_ms carries.
+    source = fetched()
+    ring = source.series()[f"{ELEC}.kwh"]
+    assert ring["age_ms"] > 12 * 3600 * 1000, ring["age_ms"]
+    frame = {}
+    source.sample(frame, 1.0)
+    assert abs(frame[ELEC]["behind_h"] - ring["age_ms"] / 3600000.0) < 0.6, (
+        frame[ELEC]["behind_h"], ring["age_ms"])
+
+
+@check
 def test_a_meter_s_ring_ends_where_its_readings_do():
     """A meter reports a day late.
 
