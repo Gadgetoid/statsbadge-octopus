@@ -2,7 +2,9 @@
 
 Your Octopus Energy prices and meter readings as readings, for [statsbadge](https://github.com/pimoroni/statsbadge).
 
-On an Agile tariff the useful half of the price curve has not happened yet, so the next six hours travel as **bars with the times down the side**: put the washing on at the short one. The day behind you is a graph, and each meter reports what it used and what that day cost.
+On an Agile tariff the useful half of the price curve has not happened yet, so the next six hours travel as **bars with the times down the side**: put the washing on at the short one.
+
+On any tariff, each meter reports what it used, what that day cost, and a half-hourly graph of it. A flat tariff has no curve to draw, so the bars and the cheapest-slot readings are not offered for one - the **Tariff** reading is there to say which you are on.
 
 ## Install
 
@@ -35,10 +37,11 @@ Nothing else needs setting. The tariff, the region, the product code and the met
 | ------- | ---------- |
 | Price now | Pence a kWh including VAT, for the half hour in progress |
 | Standing charge | Pence a day |
+| Tariff | The product the readings are priced against, so a page with no curve says why |
 | Last half hour | The most recent reading the meter has sent Octopus |
 | Last full day | A whole local day, so a part-reported day is skipped rather than read as a quiet one |
 | Cost that day | That day's half-hours, each priced at the rate that applied to it |
-| Meter reported | How many hours behind the meter is |
+| Meter reported | How many hours behind the meter is. Two days is normal |
 
 On a tariff with a half-hourly curve, also:
 

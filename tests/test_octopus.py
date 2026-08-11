@@ -9,12 +9,13 @@ import datetime
 import sys
 
 from statsbadge_octopus import (
-    AGILE_FROM,
     FORWARD_SLOTS,
     GAS_M3_TO_KWH,
     HISTORY_SLOTS,
+    SLOT_S,
     Octopus,
     _cost,
+    _curved,
     _current_tariff,
     _last_full_day,
     _priced,
@@ -224,8 +225,31 @@ def test_a_fixed_tariff_gets_no_curve():
     source.sample(frame, 1.0)
     assert "cheapest_in_h" not in frame[GAS], frame[GAS]
     assert frame[GAS]["price"] == 6.4
+    # Which is why the product is a reading: a page with no curve is a tariff with none.
+    assert frame[GAS]["tariff"] == "VAR-22-11-01", frame[GAS]
+    assert frame[ELEC]["tariff"] == "AGILE-24-10-01", frame[ELEC]
     # No ring either: one row covering a year fills none of the slots anyway.
     assert f"{GAS}.price" not in source.series(), sorted(source.series())
+
+
+@check
+def test_a_curve_is_told_by_how_wide_its_rows_are():
+    """Counting what is ahead dropped the fields every evening.
+
+    Agile publishes only as far as 23:00 tomorrow, so by late evening a handful of slots are
+    left; the tariff still has a curve. A fixed rate is one row until further notice.
+    """
+    agile = [(slot(step), slot(step + 1), 10.0) for step in range(-4, 2)]
+    assert _curved(agile)
+    # Two slots ahead is still Agile, and the page keeps its fields.
+    priced = _priced(agile, NOW)
+    assert "forward_p" in priced and len(priced["forward_p"]) == 2, priced
+
+    assert not _curved([(slot(-1000), slot(1000), 24.1)])
+    assert not _curved([])
+    # A row exactly a settlement period wide counts, since that is what Agile sends.
+    one = slot(0)
+    assert _curved([(one, one + datetime.timedelta(seconds=SLOT_S), 5.0)])
 
 
 @check
@@ -351,7 +375,6 @@ def test_only_what_it_asked_for():
     assert len(rates) == 2, rates
     used = [path for path in source.asked if path.endswith("/consumption/")]
     assert len(used) == 2, used
-    assert AGILE_FROM > 1, "a fixed tariff would be read as a curve"
     assert source.last_fault is None, source.last_fault
 
 

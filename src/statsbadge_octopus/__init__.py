@@ -66,9 +66,9 @@ RATES_PAGE = 1500
 FORWARD_SLOTS = 12
 HISTORY_SLOTS = SLOTS_A_DAY
 
-# What a meter's consumption is asked for. Two days, so the last complete day is in there
-# whatever time it is and however far behind the meter is.
-USE_BACK_H = 48
+# What a meter's consumption is asked for. A meter reporting 43 hours late has no complete
+# local day inside two days, so this reaches back far enough to hold one anyway.
+USE_BACK_H = 24 * 5
 USE_PAGE = 1500
 
 # What this says before it has a key and an account. Shown as a note and left out of the
@@ -90,6 +90,9 @@ GAS_UNITS = ("m3", "kWh")
 PRICE_FIELDS = {
     "price": {"label": "Price now", "unit": "p"},
     "standing_charge": {"label": "Standing charge", "unit": "p/day"},
+    # Which product the readings are priced against. A page with no curve on it is a
+    # tariff with no curve in it, and this is the only place that shows.
+    "tariff": {"label": "Tariff"},
 }
 
 # The rest of the curve, for a tariff that has one. A fixed tariff gets none of these: every
@@ -119,9 +122,9 @@ USE_FIELDS = {
 # pickers never offer it.
 LANE_NAMES = "forward_p_names"
 
-# How many prices ahead make a tariff worth drawing a curve for. A fixed rate answers with
-# one slot that runs for a year; Agile answers with dozens.
-AGILE_FROM = 4
+# Whether a tariff has a curve is a matter of how wide its rows are, and not of how many
+# arrived. Agile publishes only to 23:00 tomorrow, so counting what is ahead would take
+# the fields off the page every evening.
 
 
 class Octopus(Source):
@@ -225,8 +228,7 @@ class Octopus(Source):
 
         with self._lock:
             points = list(self._points)
-            curved = {group for group, rates in self._rates.items()
-                      if len(rates) >= AGILE_FROM}
+            curved = {group for group, rates in self._rates.items() if _curved(rates)}
         self._watched = [point for point in points
                          if self.config.get(f"meter_{point['slug']}", True)]
 
@@ -262,6 +264,7 @@ class Octopus(Source):
                         if group in self.groups}
             rates = {group: list(found) for group, found in self._rates.items()}
             standing = dict(self._standing)
+            tariffs = {point["group"]: point["product"] for point in self._watched}
 
         now = datetime.datetime.now(datetime.timezone.utc)
         for group in self.groups:
@@ -269,6 +272,8 @@ class Octopus(Source):
             values.update(_priced(rates.get(group) or (), now))
             if standing.get(group) is not None:
                 values["standing_charge"] = standing[group]
+            if tariffs.get(group):
+                values["tariff"] = tariffs[group]
             declared = (self.groups[group].get("fields") or {})
             kept = {name: value for name, value in values.items()
                     if value is not None and (name in declared or name == LANE_NAMES)}
@@ -408,7 +413,7 @@ class Octopus(Source):
             with self._lock:
                 self._rates[point["group"]] = rates
                 self._standing[point["group"]] = standing
-            if len(rates) >= AGILE_FROM:
+            if _curved(rates):
                 # A flat tariff gets no ring: every point would be the same number, and one
                 # row covering a year fills none of the slots anyway.
                 self._push_ring(point["group"], "price",
@@ -646,6 +651,15 @@ def _product_of(tariff):
     return "-".join(parts[2:-1])
 
 
+def _curved(rates):
+    """Whether a tariff prices by the settlement period, or by one rate until further notice.
+
+    Read off the width of the rows and not off how many arrived. Agile publishes only as far
+    as 23:00 tomorrow, so counting what is ahead would drop the curve every evening.
+    """
+    return any((until - when).total_seconds() <= SLOT_S for when, until, _price in rates)
+
+
 def _priced(rates, now):
     """The readings that are a matter of where `now` falls in the curve.
 
@@ -665,7 +679,7 @@ def _priced(rates, now):
 
     forward = ahead[:FORWARD_SLOTS]
     out = {"price": round(forward[0][1], 2)}
-    if len(ahead) < AGILE_FROM:
+    if not _curved(rates):
         return out
 
     cheapest = min(forward, key=lambda entry: entry[1])
