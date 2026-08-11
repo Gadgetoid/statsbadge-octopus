@@ -355,13 +355,17 @@ class Octopus(Source):
         # than against whatever the last run happened to hold.
         if now >= self._next_use:
             try:
-                self._refresh_use()
+                answered = self._refresh_use()
             except Exception as exc:
                 self._next_use = time.monotonic() + RETRY_AFTER
                 self.note_fault(exc)
                 return
             self._next_use = time.monotonic() + USE_EVERY
-            worked = True
+            worked = worked or answered
+            if not answered:
+                # A meter reported nothing and said so. Clearing that here would leave the
+                # line on screen for one poll in every thirty minutes.
+                return
 
         if worked:
             self.note_ok()
@@ -467,16 +471,21 @@ class Octopus(Source):
                 f"/{point['fuel']}-tariffs/{urllib.parse.quote(point['tariff'])}/")
 
     def _refresh_use(self):
-        """What each watched meter recorded, and what the last full day of it cost."""
+        """What each watched meter recorded, and what the last full day of it cost.
+
+        True when every meter answered. A meter that reported nothing is one meter and not
+        the account, so the others are still read - but note_ok() would clear the line
+        saying so, and the caller needs to know not to.
+        """
+        every = True
         for point in list(self._watched):
             with self._lock:
                 rates = list(self._rates.get(point["group"]) or ())
             try:
                 values, used = self._use_of(point, rates)
             except OctopusError as exc:
-                # A meter that has never reported answers 404, which is one meter and not
-                # the account. The others are still worth having.
                 self.note_fault(exc)
+                every = False
                 continue
             with self._lock:
                 self._readings.setdefault(point["group"], {}).update(values)
@@ -486,27 +495,39 @@ class Octopus(Source):
                 # squeezed into the left of the plot.
                 self._push_ring(point["group"], "kwh", dict(used), used[-1][0],
                                 datetime.datetime.now(datetime.timezone.utc), 3)
+        return every
 
     def _use_of(self, point, rates):
-        """One meter's half-hours as readings, and the half-hours themselves for a ring."""
+        """One meter's half-hours as readings, and the half-hours themselves for a ring.
+
+        Each serial the point lists is asked in turn, since an exchanged meter answers with
+        an empty list and the live one is not always first.
+        """
         now = datetime.datetime.now(datetime.timezone.utc)
         start = _slot_start(now) - datetime.timedelta(hours=USE_BACK_H)
-        body = self._get(
-            f"/{point['fuel']}-meter-points/{urllib.parse.quote(point['id'])}"
-            f"/meters/{urllib.parse.quote(point['serial'])}/consumption/"
-            f"?period_from={_stamp(start)}&period_to={_stamp(now)}"
-            f"&order_by=period&page_size={USE_PAGE}")
-
         scale = self.gas_scale if point["fuel"] == "gas" else 1.0
+        serials = point.get("serials") or ([point["serial"]] if point.get("serial") else [])
+
         used = []
-        for row in body.get("results") or ():
-            when = _parse(row.get("interval_start"))
-            amount = row.get("consumption")
-            if when is not None and amount is not None:
-                used.append((_slot_start(when), float(amount) * scale))
+        for serial in serials:
+            body = self._get(
+                f"/{point['fuel']}-meter-points/{urllib.parse.quote(point['id'])}"
+                f"/meters/{urllib.parse.quote(serial)}/consumption/"
+                f"?period_from={_stamp(start)}&period_to={_stamp(now)}"
+                f"&order_by=period&page_size={USE_PAGE}")
+            for row in body.get("results") or ():
+                when = _parse(row.get("interval_start"))
+                amount = row.get("consumption")
+                if when is not None and amount is not None:
+                    used.append((_slot_start(when), float(amount) * scale))
+            if used:
+                break
         if not used:
-            # Not a fault: a meter installed this week has nothing to report yet.
-            return {}, []
+            # Said out loud, since the alternative is a group with a price on it and no
+            # readings, which looks the same as an extension that is broken.
+            raise OctopusError(
+                f"{point['label']}: {', '.join(serials)} reported nothing in the last "
+                f"{USE_BACK_H // 24} days")
 
         used.sort(key=lambda entry: entry[0])
         newest, latest = used[-1]
@@ -590,13 +611,14 @@ def _point_of(fuel, point):
     """
     if point.get("is_export"):
         return None
-    serial = ""
-    for meter in point.get("meters") or ():
-        serial = str(meter.get("serial_number") or "")
-        if serial:
-            break
+    # Every one of them, newest last as the account lists them. A meter point carries the
+    # meters it has ever had, and an exchanged one answers with no readings at all, so the
+    # first is a guess.
+    serials = [str(meter.get("serial_number") or "")
+               for meter in point.get("meters") or ()]
+    serials = [serial for serial in serials if serial]
     identifier = str(point.get("mpan") or point.get("mprn") or "")
-    if not serial or not identifier:
+    if not serials or not identifier:
         return None
 
     tariff = _current_tariff(point.get("agreements") or ())
@@ -606,7 +628,7 @@ def _point_of(fuel, point):
     return {
         "fuel": fuel,
         "id": identifier,
-        "serial": serial,
+        "serials": serials,
         "tariff": tariff,
         "product": _product_of(tariff),
         "label": ("Electricity" if fuel == "electricity" else "Gas")

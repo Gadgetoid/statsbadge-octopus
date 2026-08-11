@@ -50,7 +50,8 @@ ACCOUNT = {
     "properties": [{
         "electricity_meter_points": [
             {"mpan": "1200023305967", "is_export": False,
-             "meters": [{"serial_number": "19L3255555"}],
+             # Two of them: an exchanged meter, then the live one.
+             "meters": [{"serial_number": "17L0000001"}, {"serial_number": "19L3255555"}],
              "agreements": [
                  {"tariff_code": "E-1R-VAR-22-11-01-M",
                   "valid_from": "2023-01-01T00:00:00Z", "valid_to": "2024-10-01T00:00:00Z"},
@@ -124,6 +125,9 @@ class Faked(Octopus):
                 return agile_rates()
             return flat_rates(6.4 if "/gas-tariffs/" in path else 24.1)
         if "/consumption/" in path:
+            # The exchanged meter answers with an empty list, as a real one does.
+            if "17L0000001" in path:
+                return {"results": []}
             # A gas meter reporting cubic metres, and electricity in kWh.
             return consumption(0.25 if "/electricity-" in path else 0.05)
         raise AssertionError(f"unexpected path {path}")
@@ -278,6 +282,44 @@ def test_each_meter_is_priced_against_its_own_tariff():
 
 
 @check
+def test_every_meter_on_a_point_is_asked():
+    """An electricity point lists the meters it has ever had after an exchange.
+
+    The exchanged one answers with an empty list, and it is not always last, so taking the
+    first serial gave a group with a price on it and no readings at all.
+    """
+    source = fetched()
+    asked = [path for path in source.asked if path.endswith("/consumption/")]
+    assert any("17L0000001" in path for path in asked), asked
+    assert any("19L3255555" in path for path in asked), asked
+
+    frame = {}
+    source.sample(frame, 1.0)
+    assert frame[ELEC]["kwh"] == 0.25, frame[ELEC]
+    assert source.last_fault is None, source.last_fault
+
+
+@check
+def test_a_meter_that_has_reported_nothing_says_so():
+    """A group with a price and no readings looks the same as a broken extension."""
+    class Silent(Faked):
+        def _get(self, path):
+            if "/consumption/" in path:
+                self.asked.append(path.split("?")[0])
+                return {"results": []}
+            return super()._get(path)
+
+    source = Silent()
+    source._refresh_account()
+    source._refresh_rates()
+    source._refresh_use()
+    assert source.last_fault and "reported nothing" in source.last_fault, source.last_fault
+    # Both serials were tried before giving up on the point.
+    tried = [p for p in source.asked if "/electricity-meter-points/" in p]
+    assert len(tried) == 2, tried
+
+
+@check
 def test_a_part_reported_day_is_not_costed():
     """A day short of an hour reads as a quiet one, and its cost is short by as much."""
     # Three days back, so one whole local day is in there whatever time it is now.
@@ -373,8 +415,9 @@ def test_only_what_it_asked_for():
     assert source.asked.count("/accounts/A-1234ABCD/") == 1
     rates = [path for path in source.asked if "standard-unit-rates" in path]
     assert len(rates) == 2, rates
+    # Three: the electricity point lists two meters and the first has nothing.
     used = [path for path in source.asked if path.endswith("/consumption/")]
-    assert len(used) == 2, used
+    assert len(used) == 3, used
     assert source.last_fault is None, source.last_fault
 
 
