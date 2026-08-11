@@ -88,14 +88,20 @@ So a dial is the wrong page for a price. Use it for `Last full day` if you want 
 
 ## What it asks for, and how often
 
-| Request | How often |
-| ------- | --------- |
-| `/accounts/{number}` | Hourly. Somebody switching tariff is not worth polling for |
-| `/products/.../standard-unit-rates/` | Every fifteen minutes, per tariff |
-| `/products/.../standing-charges/` | With the rates |
-| `/{fuel}-meter-points/.../consumption/` | Every half hour, per meter, asking whether yesterday has landed |
+Every clock is set by how fast the thing behind it moves. Octopus documents no rate limit, which is a reason to be careful with it and not a licence.
 
-The price on the badge turns over on the half hour whatever the fetch interval is: the whole published curve is held, and the slot covering now is read out of it on every sample.
+| Request | How often | Why that often |
+| ------- | --------- | -------------- |
+| `/products/.../standard-unit-rates/` | Hourly, per tariff | A tariff publishes tomorrow's in one go each afternoon |
+| `/{fuel}-meter-points/.../consumption/` | Hourly, per meter | A meter sends its half-hours a day or more later |
+| `/accounts/{number}` | Every 6 hours | A switch takes days, and meter serials never change |
+| `/products/.../standing-charges/` | Twice a day | Pence a day, moving at a tariff change or a price cap |
+
+That is about **5 requests an hour** for a house with one electricity meter and one gas meter, and it scales with meter points rather than with anything else.
+
+The price on the badge turns over on the half hour whatever the fetch interval is: two days of the curve are held, and the slot covering now is read out of it on every sample. So an hour late in noticing tomorrow's prices costs nothing on screen.
+
+A failure waits two minutes and then doubles, up to an hour. A rejected key otherwise means thirty requests an hour for as long as nobody notices.
 
 Export meter points are skipped. What a panel sold and what the house bought would draw the same page and mean the opposite.
 

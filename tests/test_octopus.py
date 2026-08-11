@@ -134,9 +134,11 @@ class Faked(Octopus):
 
 
 def fetched():
+    """A source with one of every cycle run, which is what a first poll does."""
     source = Faked()
     source._refresh_account()
     source._refresh_rates()
+    source._refresh_standing()
     source._refresh_use()
     return source
 
@@ -351,6 +353,7 @@ def test_a_meter_that_has_reported_nothing_says_so():
     source = Silent()
     source._refresh_account()
     source._refresh_rates()
+    source._refresh_standing()
     source._refresh_use()
     assert source.last_fault and "reported nothing" in source.last_fault, source.last_fault
     # Both serials were tried before giving up on the point.
@@ -390,6 +393,7 @@ def test_gas_is_converted_out_of_cubic_metres():
     told = Faked({"api_key": "k", "account_number": "A-1", "gas_units": "kWh"})
     told._refresh_account()
     told._refresh_rates()
+    told._refresh_standing()
     told._refresh_use()
     plain = {}
     told.sample(plain, 1.0)
@@ -471,6 +475,49 @@ def test_nothing_is_asked_of_the_api_until_it_is_configured():
     # The message goes as soon as a key is given, without waiting for the first reply.
     quiet.configure({"api_key": "sk_live_fake", "account_number": "A-1"})
     assert quiet.last_fault is None
+
+
+@check
+def test_nothing_is_asked_for_faster_than_it_changes():
+    """Octopus documents no rate limit, which is a reason to be careful with it.
+
+    Every clock is set by how fast the thing behind it moves. A standing charge held for
+    months was being re-read every fifteen minutes, eight times an hour per tariff.
+    """
+    import statsbadge_octopus as octopus
+
+    # A tariff publishes daily and a meter reports daily, so an hour covers both. A standing
+    # charge and a tariff switch are slower still.
+    assert octopus.EVERY >= 3600.0, octopus.EVERY
+    assert octopus.USE_EVERY >= 3600.0, octopus.USE_EVERY
+    assert octopus.STANDING_EVERY >= 12 * 3600.0, octopus.STANDING_EVERY
+    assert octopus.ACCOUNT_EVERY >= 6 * 3600.0, octopus.ACCOUNT_EVERY
+    # The slow ones are slower than the prices, which is the whole point of splitting them.
+    assert octopus.STANDING_EVERY > octopus.EVERY
+    assert octopus.ACCOUNT_EVERY > octopus.EVERY
+
+    # An hour of it, counted per endpoint, for one electricity and one gas meter.
+    source = Faked()
+    source._refresh_account()
+    source.asked.clear()
+    for _ in range(int(3600 // octopus.EVERY)):
+        source._refresh_rates()
+    for _ in range(int(3600 // octopus.USE_EVERY)):
+        source._refresh_use()
+    standing = int(3600 // octopus.STANDING_EVERY)
+    for _ in range(standing):
+        source._refresh_standing()
+    assert standing == 0, "a standing charge is being read within the hour"
+    assert len(source.asked) <= 6, source.asked
+
+    # A rejected key backs off rather than retrying flat for as long as nobody notices.
+    waits = []
+    for missed in range(6):
+        source._missed = missed
+        waits.append(source._wait())
+    assert waits == sorted(waits) and waits[0] == octopus.RETRY_AFTER, waits
+    assert waits[-1] <= octopus.RETRY_CEILING, waits
+    assert waits[-1] > waits[0] * 4, waits
 
 
 @check

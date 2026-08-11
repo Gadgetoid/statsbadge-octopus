@@ -38,16 +38,28 @@ from statsbadge.sources.base import Source
 
 API = "https://api.octopus.energy/v1"
 
-# A tariff publishes tomorrow's in one go each afternoon, and `sample` reads the current
-# slot out of what is held, so this only has to have tomorrow before midnight.
-EVERY = 900.0
-# A switch is rare and the meter serials stay put for the life of the meter.
-ACCOUNT_EVERY = 3600.0
-# The meters report to Octopus a day or more behind, so this is asking whether yesterday
-# has landed yet.
-USE_EVERY = 1800.0
-# What a failure waits before trying again. Shorter than the interval, and not forever.
+# Every clock below is set by how fast the thing behind it moves. Octopus documents no rate
+# limit, which is a reason to be careful with it and not a licence.
+
+# A tariff publishes tomorrow's prices in one go each afternoon. Two days of them are held,
+# so an hour late in noticing costs nothing on screen.
+EVERY = 3600.0
+# A meter sends its half-hours to Octopus in batches a day or more later, so this is asking
+# whether yesterday has landed. Twice that often would be asking twice as often as a meter
+# has anything to say.
+USE_EVERY = 3600.0
+# A standing charge moves when a tariff changes or the cap does, which is quarterly at the
+# most. It was on the same clock as the prices, at eight requests an hour to re-read a
+# number that holds for months.
+STANDING_EVERY = 12 * 3600.0
+# A switch takes days to complete and the meter serials stay put for the life of the meter.
+ACCOUNT_EVERY = 6 * 3600.0
+
+# What a failure waits before trying again, doubling up to a ceiling. A flat retry turns a
+# rejected key into thirty requests an hour for as long as nobody notices.
 RETRY_AFTER = 120.0
+RETRY_CEILING = 3600.0
+RETRY_DOUBLINGS = 4
 FETCH_POLL = 1.0
 
 # Half an hour, which is the grid's settlement period and so the width of everything here.
@@ -174,6 +186,9 @@ class Octopus(Source):
         self._next = 0.0
         self._next_account = 0.0
         self._next_use = 0.0
+        self._next_standing = 0.0
+        # Consecutive failures, for how long to wait before asking again.
+        self._missed = 0
         self._fetcher = None
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -217,6 +232,8 @@ class Octopus(Source):
             # for as long as the first request takes.
             self.last_fault = None
         self._next = self._next_account = self._next_use = 0.0
+        self._next_standing = 0.0
+        self._missed = 0
         self._wake.set()
 
     # -- what this source offers --------------------------------------------
@@ -333,48 +350,50 @@ class Octopus(Source):
             self._wake.wait(FETCH_POLL)
             self._wake.clear()
 
+    def _wait(self):
+        """How long a failure waits before asking again, doubling to a ceiling."""
+        return min(RETRY_AFTER * (1 << min(self._missed, RETRY_DOUBLINGS)), RETRY_CEILING)
+
     def _refresh(self):
         if not self.key or not self.account:
             self.last_fault = UNSET
             return
         now = time.monotonic()
-        if now >= self._next_account:
+
+        # The account first: the rest is per meter point, and the points come from here.
+        # Each clock is its own, so a slow one is not dragged along by a fast one.
+        for when, every, fetch in (
+                ("_next_account", ACCOUNT_EVERY, self._refresh_account),
+                ("_next", self.every, self._refresh_rates),
+                ("_next_standing", STANDING_EVERY, self._refresh_standing),
+        ):
+            if now < getattr(self, when):
+                continue
             try:
-                self._refresh_account()
+                fetch()
             except Exception as exc:
-                self._next_account = now + RETRY_AFTER
+                setattr(self, when, now + self._wait())
+                self._missed += 1
                 self.note_fault(exc)
                 return
-            self._next_account = time.monotonic() + ACCOUNT_EVERY
+            setattr(self, when, time.monotonic() + every)
+            self._missed = 0
 
-        worked = False
-        if now >= self._next:
-            try:
-                self._refresh_rates()
-            except Exception as exc:
-                self._next = time.monotonic() + RETRY_AFTER
-                self.note_fault(exc)
-                return
-            self._next = time.monotonic() + self.every
-            worked = True
-
-        # After the rates, so a day is priced against the tariff that applied to it rather
-        # than against whatever the last run happened to hold.
+        # After the rates, so a day is priced against the tariff that applied to it and not
+        # against whatever the last run happened to hold.
+        answered = True
         if now >= self._next_use:
             try:
                 answered = self._refresh_use()
             except Exception as exc:
-                self._next_use = time.monotonic() + RETRY_AFTER
+                self._next_use = now + self._wait()
+                self._missed += 1
                 self.note_fault(exc)
                 return
             self._next_use = time.monotonic() + USE_EVERY
-            worked = worked or answered
-            if not answered:
-                # A meter reported nothing and said so. Clearing that here would leave the
-                # line on screen for one poll in every thirty minutes.
-                return
+            self._missed = 0
 
-        if worked:
+        if answered:
             self.note_ok()
 
     def _refresh_account(self):
@@ -424,10 +443,8 @@ class Octopus(Source):
             if not point["product"] or not point["tariff"]:
                 continue
             rates = self._unit_rates(point, start, end)
-            standing = self._standing_charge(point)
             with self._lock:
                 self._rates[point["group"]] = rates
-                self._standing[point["group"]] = standing
             if _curved(rates):
                 # A flat tariff gets no ring: every point would be the same number, and one
                 # row covering a year fills none of the slots anyway.
@@ -437,6 +454,19 @@ class Octopus(Source):
         # A tariff with a curve offers fields a fixed one does not, and whether it has one
         # is only known once its prices are in.
         self._read_settings()
+
+    def _refresh_standing(self):
+        """The standing charge per watched meter, on its own slow clock.
+
+        Pence a day, which moves at a tariff change or a price cap and holds for months
+        between. It rode along with the prices, and was re-read every fifteen minutes.
+        """
+        for point in list(self._watched):
+            if not point["product"] or not point["tariff"]:
+                continue
+            standing = self._standing_charge(point)
+            with self._lock:
+                self._standing[point["group"]] = standing
 
     def _unit_rates(self, point, start, end):
         """A tariff's prices as (start, end, pence) ascending.
