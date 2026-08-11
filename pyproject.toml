@@ -1,0 +1,31 @@
+[project]
+name = "statsbadge-octopus"
+dynamic = ["version"]
+description = "Octopus Energy half-hourly prices and meter readings as statsbadge readings"
+readme = "README.md"
+authors = [
+    { name = "Philip Howard", email = "phil@pimoroni.com" },
+]
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = ["statsbadge>=1.3.0"]
+
+[project.urls]
+Homepage = "https://github.com/pimoroni/statsbadge-octopus"
+Repository = "https://github.com/pimoroni/statsbadge-octopus"
+Issues = "https://github.com/pimoroni/statsbadge-octopus/issues"
+
+# The whole extension mechanism is this one entry point:
+[project.entry-points."statsbadge.sources"]
+octopus = "statsbadge_octopus:Octopus"
+
+# The tag is the version.
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/statsbadge_octopus"]
+
+[build-system]
+requires = ["hatchling", "uv-dynamic-versioning"]
+build-backend = "hatchling.build"
