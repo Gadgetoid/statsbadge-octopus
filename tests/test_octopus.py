@@ -157,7 +157,7 @@ def test_the_tariff_in_force_beats_the_one_that_was():
     """An account carries every agreement it has ever had, and tomorrow's beside today's."""
     agreements = ACCOUNT["properties"][0]["electricity_meter_points"][0]["agreements"]
     assert _current_tariff(agreements) == "E-1R-AGILE-24-10-01-M"
-    # A switch that starts tomorrow is not the one running now.
+    # A switch that starts tomorrow leaves today's agreement running.
     ahead = [*agreements, {"tariff_code": "E-1R-GO-24-01-01-M",
                            "valid_from": stamp(NOW + datetime.timedelta(days=1)),
                            "valid_to": None}]
@@ -167,6 +167,45 @@ def test_the_tariff_in_force_beats_the_one_that_was():
                              "valid_from": "2020-01-01T00:00:00Z",
                              "valid_to": "2021-01-01T00:00:00Z"}]) == "E-1R-VAR-22-11-01-M"
     assert _current_tariff(()) == ""
+
+
+@check
+def test_a_meter_point_is_named_by_its_fuel():
+    """A graph of gas and electricity is told apart by which is which.
+
+    The badge names a series by its field where that is unique and by the group where it is
+    not, so two kWh series fall back to these. The tail of an MPAN told them apart and meant
+    nothing to anybody reading the page.
+    """
+    source = Faked()
+    source._refresh_account()
+    labels = {point["fuel"]: point["label"] for point in source._points}
+    assert labels == {"electricity": "Electricity", "gas": "Gas"}, labels
+    # The group key still carries it: a layout names groups, and two accounts could hold a
+    # meter each.
+    assert all(point["id"][-4:] in point["group"] for point in source._points)
+
+    # Two of one fuel is the only case with nothing else to go on.
+    twin = dict(ACCOUNT)
+    prop = dict(ACCOUNT["properties"][0])
+    prop["gas_meter_points"] = [*prop["gas_meter_points"],
+                                {"mprn": "1234500000",
+                                 "meters": [{"serial_number": "G4K9999999"}],
+                                 "agreements": [{"tariff_code": "G-1R-VAR-22-11-01-M",
+                                                 "valid_from": "2024-01-01T00:00:00Z",
+                                                 "valid_to": None}]}]
+    twin["properties"] = [prop]
+
+    class TwoMeters(Faked):
+        def _get(self, path):
+            if path.startswith("/accounts/"):
+                return twin
+            return super()._get(path)
+
+    two = TwoMeters()
+    two._refresh_account()
+    named = sorted(point["label"] for point in two._points)
+    assert named == ["Electricity", "Gas 0000", "Gas 3210"], named
 
 
 @check
@@ -326,7 +365,7 @@ def test_a_part_reported_day_is_not_costed():
     whole = [(slot(-step), 0.2) for step in range(1, 3 * 48)]
     day = _last_full_day(whole)
     assert day is not None and len(day) >= 48, None if day is None else len(day)
-    # Today so far is not a day, however many hours of it there are.
+    # Today so far falls short of a day, however many hours of it there are.
     assert _last_full_day([(slot(-step), 0.2) for step in range(1, 10)]) is None
 
     # A slot with no price is no total: four fifths of a day reads as a cheap day.

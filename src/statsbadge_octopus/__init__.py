@@ -84,6 +84,10 @@ POINTS = "points"
 GAS_M3_TO_KWH = 11.1868
 GAS_UNITS = ("m3", "kWh")
 
+# What a meter point is called on a page. The fuel is what tells gas from electricity,
+# where the tail of an MPAN reads as noise. Two of one fuel take the tail as well.
+FUELS = {"electricity": "Electricity", "gas": "Gas"}
+
 # Prices are pence a kWh including VAT, as the bill charges them. Agile goes negative
 # when the grid is oversupplied, so `peak` and a full scale are both left off: each reads a
 # negative as an empty gauge, and a dial cannot draw one at all.
@@ -390,6 +394,10 @@ class Octopus(Source):
                         points.append(found)
         if not points:
             raise OctopusError(f"account {self.account} has no meter points to read")
+        held = [point["fuel"] for point in points]
+        for point in points:
+            if held.count(point["fuel"]) > 1:
+                point["label"] = f"{FUELS[point['fuel']]} {point['id'][-4:]}"
 
         with self._lock:
             known = self._points
@@ -634,8 +642,7 @@ def _point_of(fuel, point):
         "serials": serials,
         "tariff": tariff,
         "product": _product_of(tariff),
-        "label": ("Electricity" if fuel == "electricity" else "Gas")
-                 + f" {identifier[-4:]}",
+        "label": FUELS[fuel],
         "slug": f"{fuel[:4]}_{identifier[-4:]}",
         "group": f"octopus_{fuel[:4]}_{identifier[-4:]}",
     }
