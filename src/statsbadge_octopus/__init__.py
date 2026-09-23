@@ -27,14 +27,12 @@ which applied to them.
 
 import base64
 import datetime
-import json
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 
-from statsbadge.sources.base import Source
+from statsbadge.sources import web
+from statsbadge.sources.base import PollingSource, SourceError
 
 API = "https://api.octopus.energy/v1"
 
@@ -60,7 +58,6 @@ ACCOUNT_EVERY = 6 * 3600.0
 RETRY_AFTER = 120.0
 RETRY_CEILING = 3600.0
 RETRY_DOUBLINGS = 4
-FETCH_POLL = 1.0
 
 # Half an hour, which is the grid's settlement period and so the width of everything here.
 SLOT_MS = 30 * 60 * 1000
@@ -146,7 +143,7 @@ LANE_NAMES = "forward_p_names"
 # the fields off the page every evening.
 
 
-class Octopus(Source):
+class Octopus(PollingSource):
     name = "octopus"
     label = "Octopus Energy"
 
@@ -189,9 +186,6 @@ class Octopus(Source):
         self._next_standing = 0.0
         # Consecutive failures, for how long to wait before asking again.
         self._missed = 0
-        self._fetcher = None
-        self._wake = threading.Event()
-        self._stop = threading.Event()
         self._read_settings()
 
     # -- lifecycle ----------------------------------------------------------
@@ -205,18 +199,7 @@ class Octopus(Source):
         with self._lock:
             self._points = [dict(point) for point in (self.store.get(POINTS) or ())]
         self._read_settings()
-        if self._fetcher is None:
-            self._stop.clear()
-            self._fetcher = threading.Thread(target=self._fetch_loop, daemon=True,
-                                             name="statsbadge-octopus")
-            self._fetcher.start()
-
-    def stop(self):
-        self._stop.set()
-        self._wake.set()
-        if self._fetcher is not None:
-            self._fetcher.join(timeout=2.0)
-            self._fetcher = None
+        super().start()
 
     def configure(self, settings):
         """Take settings while running, and ask again without waiting out the interval.
@@ -226,15 +209,12 @@ class Octopus(Source):
         """
         super().configure(settings)
         self._read_settings()
-        if self.last_fault == UNSET and self.key and self.account:
-            # That message was about the settings, and they have just been given. Waiting
-            # for a fetch to succeed first leaves the config page saying they are missing
-            # for as long as the first request takes.
-            self.last_fault = None
+        if self.key and self.account:
+            self.note_ok("setup")
         self._next = self._next_account = self._next_use = 0.0
         self._next_standing = 0.0
         self._missed = 0
-        self._wake.set()
+        self.wake()
 
     # -- what this source offers --------------------------------------------
 
@@ -247,8 +227,7 @@ class Octopus(Source):
         """
         self.key = str(self.config.get("api_key") or "").strip()
         self.account = str(self.config.get("account_number") or "").strip()
-        self.gas_scale = (GAS_M3_TO_KWH
-                          if str(self.config.get("gas_units") or "m3") == "m3" else 1.0)
+        self.gas_scale = GAS_M3_TO_KWH if self.config["gas_units"] == "m3" else 1.0
 
         with self._lock:
             points = list(self._points)
@@ -325,76 +304,40 @@ class Octopus(Source):
                                                "age_ms": entry["age_ms"]}
         return out
 
-    def note_fault(self, exc):
-        """What Octopus said, without a type name in front of it.
-
-        `readable` names the type of anything it does not recognise, which is right for a
-        fault nobody expected and wrong for a message written to be read.
-        """
-        if isinstance(exc, OctopusError):
-            self.faults += 1
-            self.last_fault = str(exc)
-            return
-        super().note_fault(exc)
-
     # -- fetching -----------------------------------------------------------
-
-    def _fetch_loop(self):
-        while not self._stop.is_set():
-            try:
-                self._refresh()
-            except Exception as exc:
-                # The fetcher must not die, or the readings would stand at whatever they
-                # last were with nothing ever replacing them.
-                self.note_fault(exc)
-            self._wake.wait(FETCH_POLL)
-            self._wake.clear()
 
     def _wait(self):
         """How long a failure waits before asking again, doubling to a ceiling."""
         return min(RETRY_AFTER * (1 << min(self._missed, RETRY_DOUBLINGS)), RETRY_CEILING)
 
-    def _refresh(self):
+    def poll(self):
         if not self.key or not self.account:
-            self.last_fault = UNSET
+            self.note_waiting(UNSET, key="setup")
             return
         now = time.monotonic()
 
         # The account first: the rest is per meter point, and the points come from here.
         # Each clock is its own, so a slow one is not dragged along by a fast one.
-        for when, every, fetch in (
-                ("_next_account", ACCOUNT_EVERY, self._refresh_account),
-                ("_next", self.every, self._refresh_rates),
-                ("_next_standing", STANDING_EVERY, self._refresh_standing),
+        # After the rates, the use, so a day is priced against the tariff that applied to it
+        # and not against whatever the last run happened to hold.
+        for when, every, fetch, key in (
+                ("_next_account", ACCOUNT_EVERY, self._refresh_account, "account"),
+                ("_next", self.every, self._refresh_rates, "rates"),
+                ("_next_standing", STANDING_EVERY, self._refresh_standing, "standing"),
+                ("_next_use", USE_EVERY, self._refresh_use, "use"),
         ):
             if now < getattr(self, when):
                 continue
             try:
                 fetch()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 setattr(self, when, now + self._wait())
                 self._missed += 1
-                self.note_fault(exc)
+                self.note_fault(exc, key=key)
                 return
             setattr(self, when, time.monotonic() + every)
             self._missed = 0
-
-        # After the rates, so a day is priced against the tariff that applied to it and not
-        # against whatever the last run happened to hold.
-        answered = True
-        if now >= self._next_use:
-            try:
-                answered = self._refresh_use()
-            except Exception as exc:
-                self._next_use = now + self._wait()
-                self._missed += 1
-                self.note_fault(exc)
-                return
-            self._next_use = time.monotonic() + USE_EVERY
-            self._missed = 0
-
-        if answered:
-            self.note_ok()
+            self.note_ok(key)
 
     def _refresh_account(self):
         """The meter points on the account, with the tariff each is on.
@@ -494,7 +437,7 @@ class Octopus(Source):
         """Pence a day, whatever is in force now. None if the tariff does not say."""
         try:
             body = self._get(f"{self._tariff_path(point)}standing-charges/?page_size=10")
-        except OctopusError:
+        except SourceError:
             # A tariff without one is ordinary: the unit price is the reading that matters,
             # and an export tariff carries no standing charge.
             return None
@@ -514,20 +457,18 @@ class Octopus(Source):
     def _refresh_use(self):
         """What each watched meter recorded, and what the last full day of it cost.
 
-        True when every meter answered. A meter that reported nothing is one meter and not
-        the account, so the others are still read - but note_ok() would clear the line
-        saying so, and the caller needs to know not to.
+        A meter that reported nothing is one meter and not the account, so the others are
+        still read and its fault stands under its own name.
         """
-        every = True
         for point in list(self._watched):
             with self._lock:
                 rates = list(self._rates.get(point["group"]) or ())
             try:
                 values, used = self._use_of(point, rates)
-            except OctopusError as exc:
-                self.note_fault(exc)
-                every = False
+            except SourceError as exc:
+                self.note_fault(exc, key=point["group"])
                 continue
+            self.note_ok(point["group"])
             with self._lock:
                 self._readings.setdefault(point["group"], {}).update(values)
             if used:
@@ -536,7 +477,6 @@ class Octopus(Source):
                 # squeezed into the left of the plot.
                 self._push_ring(point["group"], "kwh", dict(used), used[-1][0],
                                 datetime.datetime.now(datetime.timezone.utc), 3)
-        return every
 
     def _use_of(self, point, rates):
         """One meter's half-hours as readings, and the half-hours themselves for a ring.
@@ -610,33 +550,23 @@ class Octopus(Source):
         401, and these endpoints answer 403 without asking.
         """
         token = base64.b64encode(f"{self.key}:".encode()).decode("ascii")
-        request = urllib.request.Request(API + path, headers={
-            "Authorization": f"Basic {token}",
-            "Accept": "application/json",
-        })
-        try:
-            with urllib.request.urlopen(request, timeout=20) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            raise OctopusError(_said(exc, path)) from exc
+        return web.fetch_json(API + path, headers={"Authorization": f"Basic {token}"},
+                              timeout=20, explain=lambda exc, body: _said(exc, body, path))
 
 
-class OctopusError(Exception):
+class OctopusError(SourceError):
     """What Octopus said was wrong, as one line for the config UI to show."""
 
 
-def _said(exc, path):
+def _said(exc, body, path):
     """An HTTP failure as something to act on.
 
     The status alone says little here: a wrong key and a wrong account number are both a
     403, and the body names which.
     """
     detail = ""
-    try:
-        body = json.loads(exc.read().decode("utf-8"))
+    if isinstance(body, dict):
         detail = str(body.get("detail") or body.get("error") or "")
-    except Exception:  # noqa: BLE001
-        detail = ""
     if exc.code in (401, 403):
         return detail or "the API key was refused"
     if exc.code == 404:

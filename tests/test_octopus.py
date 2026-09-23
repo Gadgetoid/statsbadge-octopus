@@ -468,7 +468,7 @@ def test_a_gap_in_the_readings_is_a_gap_in_the_ring():
 def test_nothing_is_asked_of_the_api_until_it_is_configured():
     """An extension nobody has given a key is unconfigured, and not broken."""
     quiet = Faked({})
-    quiet._refresh()
+    quiet.poll()
     assert quiet.asked == [], quiet.asked
     assert quiet.faults == 0, "an unconfigured source reported a fault"
     assert quiet.last_fault and "API key" in quiet.last_fault
